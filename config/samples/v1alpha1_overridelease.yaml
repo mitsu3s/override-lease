@@ -1,0 +1,19 @@
+apiVersion: mitsu3s.dev/v1alpha1
+kind: OverrideLease
+metadata:
+  name: checkout-incident-headroom
+  namespace: checkout
+spec:
+  targetRef:
+    apiVersion: autoscaling/v2
+    kind: HorizontalPodAutoscaler
+    name: checkout
+  overrides:
+    - path: /spec/maxReplicas
+      value: 50
+    - path: /spec/minReplicas
+      value: 30
+  duration: 7d
+  reason: "INC-XXX: temporary checkout capacity"
+  ticket: "INC-XXX"
+  driftPolicy: FailOnDrift
