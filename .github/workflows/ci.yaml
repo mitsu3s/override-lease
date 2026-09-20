@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Test and lint Go code
+        run: |
+          make test-race
+          make lint
+
+      - name: Verify generated files
+        run: git diff --exit-code
+
+      - name: Build Kubernetes manifests
+        run: |
+          make kustomize
+          mkdir -p "${RUNNER_TEMP}/manifests"
+          ./bin/kustomize build config/default > "${RUNNER_TEMP}/manifests/default.yaml"
+          ./bin/kustomize build config/samples > "${RUNNER_TEMP}/manifests/samples.yaml"
+
+      - name: Validate Kubernetes manifests
+        run: |
+          GOBIN="${RUNNER_TEMP}/bin" go install github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0
+          "${RUNNER_TEMP}/bin/kubeconform" \
+            -kubernetes-version 1.37.0 \
+            -strict \
+            -summary \
+            -skip CustomResourceDefinition,mitsu3s.dev/v1alpha1/OverrideLease \
+            "${RUNNER_TEMP}/manifests"

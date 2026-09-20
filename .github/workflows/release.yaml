@@ -1,0 +1,111 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Validate release tag
+        shell: bash
+        run: |
+          if [[ ! "${GITHUB_REF_NAME}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "release tag must use the vX.Y.Z format" >&2
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "release tag must point to a commit on main" >&2
+            exit 1
+          fi
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Test and lint Go code
+        run: |
+          make test-race
+          make lint
+
+      - name: Verify generated files
+        run: git diff --exit-code
+
+      - name: Build release manifest
+        run: |
+          make kustomize
+          mkdir -p dist
+          cd config/manager
+          ../../bin/kustomize edit set image "controller=ghcr.io/${GITHUB_REPOSITORY}:${GITHUB_REF_NAME}"
+          cd ../..
+          ./bin/kustomize build config/default > dist/install.yaml
+
+      - name: Validate release manifest
+        run: |
+          GOBIN="${RUNNER_TEMP}/bin" go install github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0
+          "${RUNNER_TEMP}/bin/kubeconform" \
+            -kubernetes-version 1.37.0 \
+            -strict \
+            -summary \
+            -skip CustomResourceDefinition \
+            dist/install.yaml
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Generate image metadata
+        id: metadata
+        uses: docker/metadata-action@v6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: type=ref,event=tag
+
+      - name: Build and push image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/install.yaml \
+            --verify-tag \
+            --generate-notes \
+            --title "${GITHUB_REF_NAME}"
